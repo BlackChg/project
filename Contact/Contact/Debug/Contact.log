@@ -1,0 +1,9 @@
+﻿  contact.c
+c:\codewarehouse\project\contact\contact\contact.c(30): warning C4101: “name”: 未引用的局部变量
+c:\codewarehouse\project\contact\contact\contact.c(31): warning C4101: “sex”: 未引用的局部变量
+c:\codewarehouse\project\contact\contact\contact.c(34): warning C4101: “age”: 未引用的局部变量
+c:\codewarehouse\project\contact\contact\contact.c(32): warning C4101: “tel”: 未引用的局部变量
+c:\codewarehouse\project\contact\contact\contact.c(33): warning C4101: “addr”: 未引用的局部变量
+c:\codewarehouse\project\contact\contact\contact.c(209): warning C4018: “<”: 有符号/无符号不匹配
+c:\codewarehouse\project\contact\contact\contact.c(211): warning C4018: “<”: 有符号/无符号不匹配
+  Contact.vcxproj -> C:\CodeWarehouse\project\Contact\Debug\Contact.exe
