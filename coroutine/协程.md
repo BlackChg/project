@@ -1,0 +1,227 @@
+**协程**（Coroutines）是用户态下的非抢占式的轻量级线程，是一种在程序开发中处理多任务的组件
+# 项目介绍
+## 项目开发环境
+Linux
+## 项目开发语言及工具
+C、vim、gcc、gdb、Makefile
+## 项目特点
+1. 协程是完全由程序来控制的，是在用户态下执行，这样子就没有用户态到内核态的切换开销
+2. 协程是非抢占式的调度，用户可以自己实现调度，同一时间只能有一个协程在执行，并且由协程主动交出控制权
+3. 协程的执行效率非常高。因为子程序切换不是线程切换，而是由程序自身控制，与同等数量的线程相比，协程的执行效率会更高
+
+## 项目适用场景
+协程主要用于I/O密集型程序，例如TCP服务器，在传统中使用多进程/线程+IO复用来实现TCP服务器，当每来一个客户端时都会创建一个线程或者进程，占用了大量的资源。每当使用时都会伴随着用户态和内核态之间调度切换带来的开销。而使用协程会解决传统方式的问题
+
+## 项目简介
+相当于用户态的一个线程组，做的每一个协程都有自己的协程栈，当有任务时将任务以回调的方式放入到协程中，在协程的回调函数中，当有任务就绪时就执行，当任务未就绪时就将自己切换出去，然后让别的流程去运行，当运行到某一条件时就去恢复协程，然后再依次判断协程中的任务是否就绪，就绪就执行，未就绪再切换出去
+
+## 项目实现概要
+用一个结构体来封装协程的属性，再用一个结构体来管理调度协程。其中协程有5个属性，分别是回调函数、回调函数的参数、协程的上下文信息、协程单独使用的栈、还有协程的状态。而管理调度协程的调度器有4属性，分别是一个协程类型的指针数组，该数组中的元素都是一个协程、还有正在运行的协程的所在数组的下标，以及指针数组中的最大下标，最后一个是主流程的上下文环境。
+创建协程时需要传入协程的调度管理器和该协程要绑定的回调函数，然后对协程的各个属性进行赋值，此时我们就要使用到ucontext函数族，在makecontext函数中将该协程的上下文回调函数设置为一个统一的函数，然后在该函数中再调用协程自身绑定的那个函数。当函数运行完时修改协程的状态为DEAD状态。
+启动协程时将协程的状态改为RUNNING状态，然后使用swapcontext函数将主流程的上下文环境进行保存，然后执行协程的回调函数。
+切换协程时将协程状态改为SUSPEND状态，然后使用swapcontext函数保存协程的上下文环境，然后执行主流程的上下文。
+回复协程时将协程的状态改为RUNNING状态，然后使用swapcontext函数将主流程的上下文环境进行保存，然后执行协程上次执行到的上下文的地方
+
+## 友情链接
+[linux ucontext族函数的原理及使用](https://blog.csdn.net/qq_44443986/article/details/117739157)
+# 协程实现
+代码连接
+[协程](https://github.com/BlackChg/project/tree/master/coroutine)
+头文件以及需要的宏定义
+```c
+#include <ucontext.h>
+
+#define COR_SIZE (1024) //协程数量
+#define STACK_SIZE (1024*64) //每个协程的栈大小
+```
+
+协程的状态有：死亡态、就绪态、运行态、暂停态
+
+```c
+enum State {DEAD, READY, RUNNING, SUSPEND};
+```
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20210609163957186.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzQ0NDQzOTg2,size_16,color_FFFFFF,t_70)
+协程与调度器
+```c
+//协程
+typedef struct coroutine
+{
+	void *(*call_back)(struct schedule *s, void* args);//回调函数
+	void *args; //回调函数参数
+	ucontext_t ctx; //协程上下文
+	char stack[STACK_SIZE]; //协程栈
+	enum State state; //协程状态
+}coroutine_t;
+
+//协程调度器
+typedef struct schedule
+{
+	coroutine_t** coroutines;//协程数组
+	int cur_id;//当前运行的协程
+	int max_id;//数组的最大协程数
+	ucontext_t ctx_main;//主流程上下文
+}schedule_t;
+```
+实现接口声明
+
+```c
+//创建协程调度器
+schedule_t* schedule_create();
+
+//创建协程，返回当前协程在调度器的下标
+int coroutine_create(schedule_t* s, void*(*call_back)(schedule_t* s, void *args), void *args);
+
+//启动协程
+int coroutine_running(schedule_t* s, int id);
+
+//协程让出CPU，返回主流程上下文
+void coroutine_yield(schedule_t* s);
+
+//恢复协程上下文
+void coroutine_resume(schedule_t* s, int id);
+
+//销毁调度器
+void schedule_destroy(schedule_t* s);
+
+//判断调度器中的协程是否都全部运行结束，全结束返回1，否则返回0
+int schedule_finished(schedule_t *s);
+```
+# 使用协程实现TCP服务器
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include "coroutine.h"
+
+int tcp_init()
+{
+	int lst_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (lst_fd == -1) 
+	{
+		perror("socket error\n");
+		exit(1);
+	}
+	int op = 1;
+	setsockopt(lst_fd, SOL_SOCKET, SO_REUSEADDR, &op, sizeof(op));
+
+	struct sockaddr_in addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(9999);
+	addr.sin_addr.s_addr = inet_addr("192.168.73.130");
+	int ret = bind(lst_fd, (struct sockaddr*)&addr, sizeof(addr));
+	if (ret == -1)
+	{
+		perror("bind error\n");
+		exit(1);
+	}
+
+	listen(lst_fd, SOMAXCONN);
+
+	return lst_fd;
+}
+
+void set_nonblock(int fd)
+{
+	int flgs = fcntl(fd, F_GETFL, 0);
+	flgs |= O_NONBLOCK;
+	fcntl(fd, F_SETFL, flgs);
+}
+
+void accept_conn(int lst_fd, schedule_t* s, int co_ids[], void* (*call_back)(schedule_t* s, void* args))
+{
+	while (1)
+	{
+		int cli_fd = accept(lst_fd, NULL, NULL);
+		//如果有新的客户端到来，就创建一个新的协程来管理这个连接
+		if (cli_fd > 0)
+		{
+			set_nonblock(cli_fd);
+
+			int args[] = {lst_fd, cli_fd};
+			int id = coroutine_create(s, call_back, args);
+			
+			if (id == COR_SIZE)
+			{
+				printf("too many connections.\n");
+				return;
+			}
+
+			co_ids[id] = id;
+			coroutine_running(s, id);
+		}
+		//当前没有客户端连接，则切换至协程的上下文继续运行
+		else
+		{
+			int i;
+			for (i = 0; i < COR_SIZE; ++i)
+			{
+				int cid = co_ids[i];
+				if (cid == -1)
+					continue;
+				coroutine_resume(s, i);
+			}
+		}
+	}
+}
+
+void* handle(schedule_t* s, void* args)
+{
+	int* arr = (int*)args;
+	int cli_fd = arr[1];
+
+	char buf[1024] = { 0 };
+	while (1)
+	{
+		memset(buf, 0x00, sizeof(buf));
+		int ret = recv(cli_fd, buf, 1024, 0);
+		if (ret == -1)
+			//如果此时没有数据，则不再等待，直接切回主流程
+			coroutine_yield(s);
+		else if (ret == 0)
+		{
+			//通信结束
+			break;
+		}
+		else
+		{
+			printf("client:%s", buf);
+			if (strncasecmp(buf, "exit", 4) == 0)
+			{
+				break;
+			}
+			memset(buf, 0x00, sizeof(buf));
+			printf("send:");
+			fgets(buf, 1024, stdin);
+			send(cli_fd, buf, ret, 0);
+		}
+	}
+}
+
+int main()
+{
+	int lst_fd = tcp_init();
+	set_nonblock(lst_fd);
+
+	schedule_t* s = schedule_create();
+	static int co_idx[COR_SIZE];
+	int i;
+	for (i = 0; i < COR_SIZE; ++i)
+	{
+		co_idx[i] = -1;
+	}
+
+	accept_conn(lst_fd, s, co_idx, handle);
+
+	schedule_destroy(s);
+
+	return 0;
+}
+```
+测试结果：
+![在这里插入图片描述](https://img-blog.csdnimg.cn/20210609165206250.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzQ0NDQzOTg2,size_16,color_FFFFFF,t_70)
